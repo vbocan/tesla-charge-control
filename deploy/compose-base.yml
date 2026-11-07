@@ -1,0 +1,15 @@
+services:
+  deye-monitor:
+    image: deye-monitor:latest
+    volumes:
+      - ./config.yaml:/config.yaml:ro
+      - tesla-state:/state
+      - /var/run/dbus:/var/run/dbus
+    environment:
+      - TZ=${TZ:-UTC}      # set TZ=Area/City in the .env next to this file
+    restart: unless-stopped
+    network_mode: host
+    privileged: true
+
+volumes:
+  tesla-state:

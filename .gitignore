@@ -1,0 +1,15 @@
+# Your real configuration: VIN, LAN addresses, Cloudflare settings.
+# Start from config.example.yaml.
+config.yaml
+.env
+
+# Build output
+deye-monitor-arm64.tar
+*.tar
+*.exe
+/tesla-charge-control
+
+# Local tooling
+.claude/
+.vscode/
+.idea/

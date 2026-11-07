@@ -1,0 +1,18 @@
+# Try Tesla Charge Control without any hardware:
+#
+#   docker compose up --build
+#
+# then open http://localhost:8080. The -demo flag simulates a sunny afternoon:
+# a Deye inverter with PV and a home battery, a Tesla Wall Connector and a car.
+# The charging logic is the real one, running in dry-run mode.
+#
+# To run it for real on a Raspberry Pi, see docs/deployment.md (the production
+# compose files live in deploy/ and are installed by deploy.ps1 / deploy.sh).
+services:
+  demo:
+    build: .
+    command: ["-demo"]
+    ports:
+      - "8080:8080"
+    environment:
+      - TZ=${TZ:-UTC}

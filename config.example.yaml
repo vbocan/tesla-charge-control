@@ -1,0 +1,111 @@
+# Tesla Charge Control — configuration
+#
+# Copy this file to config.yaml and fill in the values marked REQUIRED.
+# config.yaml is git-ignored: it holds your VIN, LAN addresses and Cloudflare
+# settings, which should never end up in a public repository.
+#
+# The defaults below match a Deye SUN-6K-SG03LP1-EU hybrid inverter with a
+# 10 kWh battery and 8 kWp of PV on two strings. Adjust them to your system.
+
+connection:
+  host: "192.168.1.50"        # REQUIRED: the Solarman Wi-Fi logger's LAN IP or hostname
+  port: 8899                  # Solarman V5 protocol port (8899 on every logger seen so far)
+  logger_sn: 1234567890       # REQUIRED: logger serial number (printed on the stick, NOT the inverter SN)
+  timeout: 10                 # read timeout in seconds
+
+battery:
+  capacity_kwh: 10            # total battery capacity in kWh
+  min_soc: 25                 # the inverter's discharge floor in % (it won't discharge below this)
+  round_trip_eff: 0.94        # round-trip efficiency (charge then discharge)
+  nominal_voltage: 52         # battery nominal voltage in V (48, 51.2, 52 ...)
+  charge_current_limit: 176   # max charge current in A (from the BMS or battery datasheet)
+  discharge_current_limit: 200 # max discharge current in A
+
+solar:
+  total_capacity_w: 8000      # installed PV capacity in W
+  string_count: 2             # number of PV strings (used to scale the per-string gauges)
+
+projection:
+  window_s: 300               # rolling window for the battery time-to-full/empty projection
+
+location:
+  latitude: 48.14             # used for sunrise/sunset (any point in your town is fine)
+  longitude: 11.58
+
+poll_interval_s: 5            # how often the inverter is read; 5 s is a good balance for the logger
+
+max_output_w: 6000            # the inverter's maximum AC output in W (6000 for the SUN-6K).
+                              # Car charging is capped so the whole home load stays under it.
+
+# --- Access control ----------------------------------------------------------
+# On the LAN the dashboard needs no login. For remote access the recommended
+# setup is a Cloudflare Tunnel gated by Cloudflare Access (see docs/deployment.md).
+
+auth_token: ""                # Only if you expose the dashboard directly (port forwarding, or a
+                              # proxy without Cloudflare Access): a long random string. Open the
+                              # dashboard once with ?token=YOUR_TOKEN and a cookie is stored.
+                              # Leave EMPTY when using the Cloudflare Tunnel: requests that reach
+                              # the Pi directly from a public address are then refused.
+
+domain: ""                    # Public domain for Caddy + Let's Encrypt (needs ports 80/443
+                              # forwarded to the Pi). Ignored when cloudflare_tunnel is true.
+
+# Remote access through a Cloudflare Tunnel (no port forwarding). deploy/cloudflare-setup.ps1
+# fills these three in for you. The tunnel token itself is NOT kept here: it lives in
+# /opt/deye-monitor/.env on the Pi.
+cloudflare_tunnel: false
+access_team_domain: ""        # e.g. "yourteam.cloudflareaccess.com"
+access_aud: ""                # the Access application's Audience (AUD) tag
+                              # Both are required once either is set; until they are,
+                              # every request that arrives through a proxy is refused.
+
+# --- Tesla charging control ---------------------------------------------------
+# The Pi talks to the car directly over Bluetooth LE with Tesla's own
+# vehicle-command library: no Tesla account, no cloud API, no rate limits.
+
+tesla:
+  enabled: true               # master switch for everything car-related
+
+  vin: ""                     # REQUIRED: your car's 17-character VIN
+                              # (Tesla app > Controls > Software, or the car's screen)
+
+  key_file: "/state/tesla-key.pem"  # BLE key; generated on first start, then paired
+                                    # from the dashboard (Pair car...). Keep it in /state.
+
+  max_amps: 25                # the most the wall connector may deliver (check your breaker!)
+
+  grid_voltage: 230           # nominal mains voltage (230 EU, 240 UK/AU, 120 US). Max mode and the
+                              # load cap use the measured voltage when available.
+
+  # Solar-mode tuning
+  grace_period_s: 240         # hold at the 5 A minimum this long before stopping (rides out clouds)
+  smoothing_window_s: 90      # rolling average of the surplus (grid export + car draw)
+  start_delay_s: 120          # surplus must stay above 5 A x voltage + 50 W this long before starting
+  cooldown_s: 180             # no restart this soon after a stop (protects the contactor)
+  standby_pv_threshold_w: 200 # below this much PV, Solar mode sleeps
+
+  load_margin_w: 400          # headroom kept below max_output_w when sizing the car's current.
+                              # 0 = use the full max_output_w. A big appliance can still exceed
+                              # the limit for a few seconds whatever the margin; a 15 s backstop
+                              # stops the car if a reduction doesn't land.
+
+  # Safety
+  grid_outage_pause: true     # stop and block charging while the grid is down (battery is for the house)
+  grid_restore_delay_s: 300   # grid must be normal this long before charging resumes
+  inverter_stale_stop_s: 120  # stop the car after this long without inverter data (0 = never)
+  idle_load_cap: true         # in Idle mode, still keep a charge the car started itself under
+                              # max_output_w (needs twc_url)
+
+  dry_run: true               # START HERE: decisions are made and logged but no command is sent
+                              # to the car. Set to false once the key is paired and you trust it.
+
+  log_retain_days: 90         # charging-log and BLE-log retention
+
+  twc_url: "http://192.168.1.60"  # Tesla Wall Connector Gen 3 on your LAN. Strongly recommended:
+                                  # it gives the real car draw and contactor state. Leave empty
+                                  # to estimate from the commanded current.
+
+  soc_poll_charging_s: 60     # how often the car's battery level is read over BLE while charging
+  soc_poll_connected_s: 1200  # ... and while plugged in but idle (sparse, so the car can sleep)
+
+  state_file: "/state/tesla.json"  # remembers the selected mode across restarts

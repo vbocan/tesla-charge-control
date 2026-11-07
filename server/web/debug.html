@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Link Health</title>
+  <link rel="icon" type="image/png" href="/web/tesla-logo.png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <script>
+    // Use the theme chosen on the dashboard (or the system one) before first paint.
+    (function () {
+      var t = null;
+      try { t = localStorage.getItem('theme'); } catch (e) {}
+      if (t !== 'light' && t !== 'dark') {
+        t = window.matchMedia && matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+      }
+      document.documentElement.setAttribute('data-theme', t);
+    })();
+  </script>
+  <link rel="stylesheet" href="/web/debug.css">
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <a href="/">&larr; Back to dashboard</a>
+      <h1>Link Health &middot; last 24 hours</h1>
+    </div>
+    <div class="panels">
+      <section class="panel" id="inverter"></section>
+      <section class="panel" id="twc"></section>
+    </div>
+  </div>
+  <script src="/web/debug.js"></script>
+  <script>
+    startLinkHealth('/api/debug/link', [
+      { key: 'inverter', title: 'Inverter', sub: 'Solarman logger reads' },
+      { key: 'twc', title: 'Wall Connector', sub: 'Vitals polls' },
+    ]);
+  </script>
+</body>
+</html>

@@ -1,0 +1,524 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{{.Title}}</title>
+  <link rel="icon" type="image/png" href="/web/tesla-logo.png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <script>
+    // Apply the saved (or system) theme before first paint so the page doesn't flash.
+    (function () {
+      var t = null;
+      try { t = localStorage.getItem('theme'); } catch (e) {}
+      if (t !== 'light' && t !== 'dark') {
+        t = window.matchMedia && matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+      }
+      document.documentElement.setAttribute('data-theme', t);
+    })();
+  </script>
+  <link rel="stylesheet" href="/web/style.css?v={{.AssetVersion}}">
+</head>
+<body>
+  <div class="dashboard">
+
+    <!-- Header -->
+    <header class="header">
+      <div class="header-top">
+        <div class="header-left">
+          <img class="header-icon-img" alt="Tesla" src="/web/tesla-logo.png"/>
+          <h1>Tesla Charge Control</h1>
+        </div>
+        <div class="header-right">
+          <span class="live-pill">
+            <span class="status-dot" id="statusDot"></span>
+            <span class="timestamp" id="timestamp">Connecting...</span>
+          </span>
+          <button type="button" class="theme-btn" id="themeBtn" title="Switch between light and dark" aria-label="Toggle light or dark theme">&#9680;</button>
+        </div>
+      </div>
+      <nav class="header-menu">
+        <a id="logLink" href="/log" style="display:none">Charging log</a>
+        <a href="/debug">Link health</a>
+        <a href="#" id="openPairModal" class="header-menu-right" style="display:none">Pair car&hellip;</a>
+      </nav>
+    </header>
+
+    <!-- Hero: live power flow + house load -->
+    <section class="hero">
+      <div class="card flow-card" title="Live power flow between solar, battery, grid, house and car. Moving dots show the direction of the energy.">
+        <div class="flow-head">
+          <h3 class="card-title">Power flow</h3>
+          <span class="flow-note" id="flowNote">Waiting for data&hellip;</span>
+        </div>
+        <svg id="flowSvg" class="flow-svg" viewBox="0 0 660 360" role="img" aria-label="Power flow diagram">
+          <defs>
+            <radialGradient id="houseGlow"><stop offset="0" stop-color="#FB923C" stop-opacity=".30"/><stop offset="1" stop-color="#FB923C" stop-opacity="0"/></radialGradient>
+          </defs>
+          <circle class="house-halo" cx="330" cy="180" r="120"/>
+
+          <!-- pipes (the channel the energy moves in) -->
+          <path class="pipe" d="M168 53 C 232 53, 224 145, 269 145"/>
+          <path class="pipe" d="M168 307 C 232 307, 224 215, 269 215"/>
+          <path class="pipe" d="M492 53 C 428 53, 436 145, 391 145"/>
+          <path class="pipe" d="M391 215 C 436 215, 428 307, 492 307"/>
+          <!-- moving energy; width follows the power -->
+          <path id="fSolar" class="flowline solar off" d="M168 53 C 232 53, 224 145, 269 145"/>
+          <path id="fBatt"  class="flowline batt off"  d="M168 307 C 232 307, 224 215, 269 215"/>
+          <path id="fGrid"  class="flowline grid off"  d="M492 53 C 428 53, 436 145, 391 145"/>
+          <path id="fCar"   class="flowline car off"   d="M391 215 C 436 215, 428 307, 492 307"/>
+
+          <!-- Solar -->
+          <g transform="translate(0,10)">
+            <rect class="node-box" width="168" height="86" rx="22"/>
+            <circle class="node-icon-bg solar" cx="38" cy="43" r="22"/>
+            <g class="node-icon solar" transform="translate(38,43)">
+              <circle r="5.5"/>
+              <path d="M0-9.5v-3M0 9.5v3M-9.5 0h-3M9.5 0h3M-6.7-6.7l-2.1-2.1M6.7 6.7l2.1 2.1M-6.7 6.7l-2.1 2.1M6.7-6.7l2.1-2.1"/>
+            </g>
+            <text class="node-label" x="74" y="31">Solar</text>
+            <text id="pfSolar" class="node-val" x="74" y="56">-- kW</text>
+            <text id="pfSolarSub" class="node-sub" x="74" y="73">&nbsp;</text>
+          </g>
+
+          <!-- Battery (the icon fills with the state of charge) -->
+          <g transform="translate(0,264)">
+            <rect class="node-box" width="168" height="86" rx="22"/>
+            <circle class="node-icon-bg batt" cx="38" cy="43" r="22"/>
+            <g class="node-icon batt" transform="translate(38,43)">
+              <rect x="-7" y="-11" width="14" height="22" rx="3"/>
+              <path d="M-3-14h6"/>
+              <rect id="pfBattFill" class="node-icon-fill" x="-4.5" y="8.5" width="9" height="0" rx="1.5"/>
+            </g>
+            <text class="node-label" x="74" y="31">Battery</text>
+            <text id="pfBatt" class="node-val" x="74" y="56">-- kW</text>
+            <text id="pfBattSub" class="node-sub" x="74" y="73">&nbsp;</text>
+            <text id="pfBattSoc" class="node-soc" x="38" y="77" text-anchor="middle">&nbsp;</text>
+          </g>
+
+          <!-- Grid -->
+          <g transform="translate(492,10)">
+            <rect class="node-box" width="168" height="86" rx="22"/>
+            <circle class="node-icon-bg grid" cx="38" cy="43" r="22"/>
+            <g class="node-icon grid" transform="translate(38,43)">
+              <path d="M0-12L-7 12M0-12L7 12M-9-6h18M-6.5 1h13M-5 7h10"/>
+            </g>
+            <text class="node-label" x="74" y="31">Grid</text>
+            <text id="pfGrid" class="node-val" x="74" y="56">-- kW</text>
+            <text id="pfGridSub" class="node-sub" x="74" y="73">&nbsp;</text>
+          </g>
+
+          <!-- Car -->
+          <g id="pfCarNode" transform="translate(492,264)" style="display:none">
+            <rect class="node-box" width="168" height="86" rx="22"/>
+            <circle class="node-icon-bg car" cx="38" cy="43" r="22"/>
+            <g class="node-icon car" transform="translate(38,43)">
+              <path d="M-11 5v-4l2.6-6h16.8l2.6 6v4zM-11 1h22"/>
+              <circle cx="-6" cy="6" r="2.2"/><circle cx="6" cy="6" r="2.2"/>
+            </g>
+            <text class="node-label" x="74" y="31">Car</text>
+            <text id="pfCar" class="node-val" x="74" y="56">-- kW</text>
+            <text id="pfCarSub" class="node-sub" x="74" y="73">&nbsp;</text>
+          </g>
+
+          <!-- House: the ring shows the load against the inverter limit -->
+          <g transform="translate(330,180)">
+            <circle class="house-disc" r="70"/>
+            <circle class="house-track" r="70"/>
+            <circle id="pfHouseArc" class="house-arc" data-level="ok" r="70" transform="rotate(-90)" stroke-dasharray="0 440"/>
+            <g class="node-icon house" transform="translate(0,-33)">
+              <path d="M-11 0L0-10 11 0M-8-2.5V9h16V-2.5"/>
+            </g>
+            <text id="pfHouse" class="house-val" text-anchor="middle" y="12">-- kW</text>
+            <text id="pfHouseSub" class="node-sub" text-anchor="middle" y="31">&nbsp;</text>
+          </g>
+        </svg>
+      </div>
+
+      <div class="card load-card" title="Total power consumed by the house right now, including the car. Measured directly by the inverter (register 178).">
+        <div class="load-head">
+          <h3 class="card-title">House load</h3>
+          <span class="pill ok" id="loadPill">Healthy</span>
+        </div>
+        <div class="ring">
+          <svg viewBox="0 0 200 200" aria-hidden="true">
+            <circle class="g-track" cx="100" cy="100" r="82" stroke-width="19" stroke-linecap="round" stroke-dasharray="387 516"/>
+            <circle id="loadArc" data-level="ok" cx="100" cy="100" r="82" fill="none" stroke-width="19" stroke-linecap="round" stroke-dasharray="0 516"/>
+          </svg>
+          <div class="ring-center">
+            <div id="loadGaugeVal" class="load-gauge-value">0<small>W</small></div>
+            <div id="loadGaugeLabel" class="gauge-label-html">House load</div>
+          </div>
+        </div>
+        <!-- Energy source breakdown -->
+        <div class="source-breakdown" title="Breakdown of where the house load power comes from: solar production, battery discharge, or grid import.">
+          <div class="source-bar-track">
+            <div id="srcBarSolar" class="source-bar-seg source-solar" style="width:0%"></div>
+            <div id="srcBarBatt" class="source-bar-seg source-batt" style="width:0%"></div>
+            <div id="srcBarGrid" class="source-bar-seg source-grid" style="width:0%"></div>
+          </div>
+          <div class="source-labels">
+            <div class="source-item" title="Portion of solar production going directly to the house (total solar minus what goes to battery/grid).">
+              <span class="source-dot source-solar"></span>
+              <span class="source-name">Solar</span>
+              <span id="srcSolarW" class="source-val">-- W</span>
+            </div>
+            <div class="source-item" title="Power drawn from the battery to supply the house (only when battery is discharging).">
+              <span class="source-dot source-batt"></span>
+              <span class="source-name">Battery</span>
+              <span id="srcBattW" class="source-val">-- W</span>
+            </div>
+            <div class="source-item" title="Power imported from the grid to supply the house (only when grid is importing).">
+              <span class="source-dot source-grid"></span>
+              <span class="source-name">Grid</span>
+              <span id="srcGridW" class="source-val">-- W</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Tesla section: vehicle charge hero + charging/wall-connector row -->
+    <div id="teslaSection" class="tesla-section" style="display:none">
+
+      <!-- Shown while car charging is paused: grid outage, grid restoring, or no inverter data -->
+      <div id="teslaPauseBanner" class="tesla-pause-banner" role="status" style="display:none"></div>
+
+      <!-- Vehicle Charge (SoC) hero — Tesla-style battery -->
+      <section class="card tesla-soc-card" id="teslaSocCard" title="Live battery state of charge, read directly from the car over BLE. Refreshes every minute while charging but only every 20 minutes while parked; use Refresh for an immediate read.">
+        <div class="soc-head">
+          <h3 class="card-title">Vehicle Charge</h3>
+          <span class="soc-head-right">
+            <button type="button" id="socRefresh" class="soc-refresh" title="Read the car now. Use it after waking the car from the Tesla app.">Refresh</button>
+            <span id="socChargeState" class="soc-state-pill" data-state="unknown">No data</span>
+          </span>
+        </div>
+        <div class="ev-battery" id="evBattery">
+          <div class="ev-battery-body">
+            <div id="evBattFill" class="ev-battery-fill" style="width:0%"></div>
+            <div id="evBattLimit" class="ev-battery-limit" style="left:80%"></div>
+            <div class="ev-battery-readout">
+              <span id="evBattPct" class="ev-battery-pct">-- %</span>
+            </div>
+          </div>
+          <div class="ev-battery-cap"></div>
+        </div>
+        <div class="soc-meta">
+          <div class="soc-meta-item" title="The charge limit set on the car. Charging stops here.">
+            <span class="soc-meta-label">Charge limit</span>
+            <span id="socLimit" class="soc-meta-val">-- %</span>
+          </div>
+          <div class="soc-meta-item" title="Estimated time remaining to reach the charge limit (reported by the car).">
+            <span class="soc-meta-label">Time to limit</span>
+            <span id="socEta" class="soc-meta-val">--</span>
+          </div>
+          <div class="soc-meta-item" title="Energy added to the battery during this charging session.">
+            <span class="soc-meta-label">Added</span>
+            <span id="socAdded" class="soc-meta-val">-- kWh</span>
+          </div>
+          <div class="soc-meta-item" title="Rated driving range at the current charge level.">
+            <span class="soc-meta-label">Range</span>
+            <span id="socRange" class="soc-meta-val">-- km</span>
+          </div>
+        </div>
+        <div id="socStale" class="soc-stale" style="display:none"></div>
+      </section>
+
+      <div class="tesla-twc-row">
+
+      <!-- Charging Logic Card -->
+      <section class="card gauge-card tesla-card" title="Charging logic control. Select a mode to dynamically adjust charging current based on solar production and battery state.">
+        <h3 class="card-title">Charging Logic</h3>
+        <svg id="teslaGauge" viewBox="0 0 220 144" class="gauge-svg">
+          <defs>
+            <linearGradient id="teslaArcGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+              <stop offset="0%" stop-color="#60A5FA"/>
+              <stop offset="100%" stop-color="#2563EB"/>
+            </linearGradient>
+          </defs>
+          <path d="M 25 115 A 85 85 0 0 1 195 115" fill="none" class="g-track" stroke-width="24" stroke-linecap="round"/>
+          <path id="teslaArc" d="" fill="none" stroke="url(#teslaArcGrad)" stroke-width="24" stroke-linecap="round"/>
+          <text x="6" y="142" text-anchor="start" class="gauge-limit">0</text>
+          <text id="teslaMaxLabel" x="214" y="142" text-anchor="end" class="gauge-limit">-- A</text>
+          <text id="teslaGaugeVal" x="110" y="82" text-anchor="middle" class="gauge-value">0 A</text>
+          <text id="teslaGaugePower" x="110" y="100" text-anchor="middle" class="gauge-label">0 W</text>
+          <text x="110" y="116" text-anchor="middle" class="gauge-label">Commanded</text>
+        </svg>
+        <div id="teslaModeStateBanner" class="tesla-state-banner" data-state="off">--</div>
+        <div class="tesla-mode-controls">
+          <div class="tesla-modes-inline" title="Select how the car should charge. Mode is saved and persists across restarts.">
+            <button class="tesla-mode-btn active" data-mode="idle" title="The car decides when to charge (its own schedule); the system only keeps the house under the inverter's limit."><svg class="mode-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z"/><path d="M17 3.5v3M15.5 5h3"/></svg><span class="mode-label">Idle</span></button>
+            <button class="tesla-mode-btn" data-mode="solar" title="Charge from solar surplus only. The inverter charges the battery first; the car gets the remainder."><svg class="mode-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="7" cy="7" r="2.6"/><path d="M7 1.8v1M7 11.2v1M1.8 7h1M11.2 7h1M3.3 3.3l.7.7M10 10l.7.7M3.3 10.7l.7-.7M10 4l.7-.7"/><rect x="9" y="13" width="11.5" height="7.5" rx="1.8"/><path d="M22.5 15.8v2.4M12 16v1.5M15 16v1.5M18 16v1.5"/></svg><span class="mode-label">Solar (Battery First)</span></button>
+            <button class="tesla-mode-btn" data-mode="nobattery" title="Charge from solar and grid — solar goes to the car first; grid covers any shortfall. The home battery stays at its current level."><svg class="mode-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="18" cy="5.5" r="2.4"/><path d="M18 1.3v.9M18 8.8v.9M13.8 5.5h.9M21.3 5.5h.9M15 2.5l.6.6M20.4 7.9l.6.6M15 8.5l.6-.6M20.4 3.1l.6-.6"/><path d="M2.5 19v-3c0-.9.6-1.6 1.4-1.9l2.3-.8 1.7-3h5.4l2.2 3 3 .9c.9.3 1.5 1 1.5 1.9v2.9"/><path d="M2.5 19h2M9 19h5.5M17.5 19h2.5"/><circle cx="7" cy="19" r="1.8"/><circle cx="16" cy="19" r="1.8"/></svg><span class="mode-label">Solar (Car First)</span></button>
+            <button class="tesla-mode-btn" data-mode="max" title="Charge at maximum rate from any source — solar, battery, and grid. Use when you need to leave soon."><svg class="mode-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13 2.5 5 13.5h6l-1 8 8-11h-6z"/></svg><span class="mode-label">Max</span></button>
+          </div>
+        </div>
+        <div class="tesla-fold">
+          <p id="teslaModeStateDesc" class="tesla-state-desc">--</p>
+        </div>
+      </section>
+
+      <!-- Wall Connector Card -->
+      <section id="twcCard" class="card gauge-card twc-card" title="Live data from the Tesla Wall Connector Gen 3. Shows the actual measured charging current.">
+        <h3 class="card-title">Wall Connector</h3>
+        <svg id="twcGauge" viewBox="0 0 220 144" class="gauge-svg">
+          <defs>
+            <linearGradient id="twcArcGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+              <stop offset="0%" stop-color="#06B6D4"/>
+              <stop offset="100%" stop-color="#0891B2"/>
+            </linearGradient>
+          </defs>
+          <path d="M 25 115 A 85 85 0 0 1 195 115" fill="none" class="g-track" stroke-width="24" stroke-linecap="round"/>
+          <path id="twcArc" d="" fill="none" stroke="url(#twcArcGrad)" stroke-width="24" stroke-linecap="round"/>
+          <text x="6" y="142" text-anchor="start" class="gauge-limit">0</text>
+          <text id="twcGaugeMaxLabel" x="214" y="142" text-anchor="end" class="gauge-limit">-- A</text>
+          <text id="twcGaugeVal" x="110" y="82" text-anchor="middle" class="gauge-value">-- A</text>
+          <text id="twcGaugePower" x="110" y="100" text-anchor="middle" class="gauge-label">-- W</text>
+          <text id="twcGaugeLabel" x="110" y="116" text-anchor="middle" class="gauge-label">Actual</text>
+        </svg>
+        <div id="twcStatusBanner" class="twc-status-banner" data-state="offline">Offline</div>
+        <div id="twcDetails" class="gauge-details" style="display:none">
+          <div class="detail-item" title="AC grid voltage measured by the Wall Connector."><span class="detail-label">Grid</span><span id="twcGridV" class="detail-value">-- V</span></div>
+          <div class="detail-item" title="Energy delivered in this charging session."><span class="detail-label">Session</span><span id="twcSessionWh" class="detail-value">-- kWh</span></div>
+          <div class="detail-item" title="Everything the Wall Connector has delivered since it was installed, from its own lifetime counter."><span class="detail-label">Total</span><span id="twcLifetimeWh" class="detail-value">-- kWh</span></div>
+          <div class="detail-item" title="Wall Connector PCBA board temperature."><span class="detail-label">PCBA Temp</span><span id="twcPCBATemp" class="detail-value">-- °C</span></div>
+          <div class="detail-item" title="Charging cable handle temperature."><span class="detail-label">Handle Temp</span><span id="twcHandleTemp" class="detail-value">-- °C</span></div>
+        </div>
+      </section>
+
+      </div>
+    </div>
+
+    <!-- Gauges Row -->
+    <section class="gauges-row">
+      <!-- Battery Gauge -->
+      <div class="card gauge-card" title="Battery power flow. Discharge (left) = battery supplies the house. Charge (right) = surplus power stored in battery.">
+        <h3 class="card-title">Battery</h3>
+        <svg id="battGauge" viewBox="0 0 220 144" class="gauge-svg">
+          <defs>
+            <linearGradient id="battChargeGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+              <stop offset="0%" stop-color="#10B981"/>
+              <stop offset="100%" stop-color="#6EE7B7"/>
+            </linearGradient>
+            <linearGradient id="battDischargeGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+              <stop offset="0%" stop-color="#FCD34D"/>
+              <stop offset="100%" stop-color="#F59E0B"/>
+            </linearGradient>
+          </defs>
+          <path d="M 25 115 A 85 85 0 0 1 195 115" fill="none" class="g-track" stroke-width="24" stroke-linecap="round"/>
+          <line x1="110" y1="17" x2="110" y2="43" class="g-tick"/>
+          <path id="battArc" d="" fill="none" stroke="url(#battChargeGrad)" stroke-width="24" stroke-linecap="round"/>
+          <text x="6" y="142" text-anchor="start" class="gauge-limit">Discharge</text>
+          <text x="110" y="11" text-anchor="middle" class="gauge-zero">0</text>
+          <text x="214" y="142" text-anchor="end" class="gauge-limit">Charge</text>
+          <text id="battGaugeVal" x="110" y="88" text-anchor="middle" class="gauge-value">0 W</text>
+          <text id="battGaugeLabel" x="110" y="106" text-anchor="middle" class="gauge-label">Idle</text>
+        </svg>
+        <div class="soc-bar-wrapper" title="State of Charge — percentage of usable battery capacity remaining.">
+          <div class="soc-bar-track">
+            <div id="socBar" class="soc-bar-fill"></div>
+          </div>
+          <span id="socBarLabel" class="soc-bar-label">-- %</span>
+        </div>
+        <svg class="spark batt" viewBox="0 0 200 40" preserveAspectRatio="none" aria-hidden="true"><path id="spBatt" d=""/></svg>
+        <div class="gauge-details">
+          <div class="detail-item" title="Battery DC bus voltage."><span class="detail-label">Voltage</span><span id="battVolt" class="detail-value">-- V</span></div>
+          <div class="detail-item" title="Battery internal temperature."><span class="detail-label">Temp</span><span id="battTempVal" class="detail-value">-- °C</span></div>
+          <div class="detail-item" title="Estimated time to full or empty, based on a rolling average."><span class="detail-label">Projection</span><span id="battProj" class="detail-value">--</span></div>
+          <div class="detail-item" title="Battery DC current. Positive = discharging, negative = charging."><span class="detail-label">Current</span><span id="battCurr" class="detail-value">-- A</span></div>
+          <div class="detail-item" title="Inverter DC side temperature."><span class="detail-label">DC Temp</span><span id="tempDC" class="detail-value">-- °C</span></div>
+          <div class="detail-item" title="Inverter AC side temperature."><span class="detail-label">AC Temp</span><span id="tempAC" class="detail-value">-- °C</span></div>
+        </div>
+      </div>
+
+      <!-- Grid Gauge -->
+      <div class="card gauge-card" title="Grid power flow. Import (left) = buying power from the grid. Export (right) = selling surplus power back.">
+        <h3 class="card-title">Grid</h3>
+        <svg id="gridGauge" viewBox="0 0 220 144" class="gauge-svg">
+          <defs>
+            <linearGradient id="gridExportGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+              <stop offset="0%" stop-color="#059669"/>
+              <stop offset="100%" stop-color="#A7F3D0"/>
+            </linearGradient>
+            <linearGradient id="gridImportGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+              <stop offset="0%" stop-color="#FECACA"/>
+              <stop offset="100%" stop-color="#DC2626"/>
+            </linearGradient>
+          </defs>
+          <path d="M 25 115 A 85 85 0 0 1 195 115" fill="none" class="g-track" stroke-width="24" stroke-linecap="round"/>
+          <line x1="110" y1="17" x2="110" y2="43" class="g-tick"/>
+          <path id="gridArc" d="" fill="none" stroke="url(#gridImportGrad)" stroke-width="24" stroke-linecap="round"/>
+          <text x="6" y="142" text-anchor="start" class="gauge-limit">Import</text>
+          <text x="110" y="11" text-anchor="middle" class="gauge-zero">0</text>
+          <text x="214" y="142" text-anchor="end" class="gauge-limit">Export</text>
+          <text id="gridGaugeVal" x="110" y="88" text-anchor="middle" class="gauge-value">0 W</text>
+          <text id="gridGaugeLabel" x="110" y="106" text-anchor="middle" class="gauge-label">--</text>
+        </svg>
+        <svg class="spark grid" viewBox="0 0 200 40" preserveAspectRatio="none" aria-hidden="true"><path id="spGrid" d=""/></svg>
+        <div class="gauge-details">
+          <div class="detail-item" title="Grid AC voltage at the point of connection."><span class="detail-label">Voltage</span><span id="gridVolt" class="detail-value">-- V</span></div>
+          <div class="detail-item" title="Grid AC frequency."><span class="detail-label">Frequency</span><span id="gridFreq" class="detail-value">-- Hz</span></div>
+          <div class="detail-item" title="Internal CT clamp reading — power measured at the inverter's built-in current transformer."><span class="detail-label">CT L1</span><span id="ctL1" class="detail-value">-- W</span></div>
+          <div class="detail-item" title="External CT clamp reading — power measured at the external current transformer on the grid connection."><span class="detail-label">Ext CT</span><span id="extCtL1" class="detail-value">-- W</span></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Solar & Inverter Gauges Row -->
+    <section class="gauges-row">
+      <!-- Solar Gauge (dual: PV1 left, PV2 right) -->
+      <div class="card gauge-card" title="Total solar production from both PV strings. PV1 fills left, PV2 fills right. Each side maxes at 3500W.">
+        <h3 class="card-title">Solar Production</h3>
+        <svg id="solarGauge" viewBox="0 0 220 144" class="gauge-svg">
+          <defs>
+            <linearGradient id="pv1Grad" x1="0%" y1="0%" x2="100%" y2="0%">
+              <stop offset="0%" stop-color="#D97706"/>
+              <stop offset="100%" stop-color="#FDE68A"/>
+            </linearGradient>
+            <linearGradient id="pv2Grad" x1="0%" y1="0%" x2="100%" y2="0%">
+              <stop offset="0%" stop-color="#FDBA74"/>
+              <stop offset="100%" stop-color="#EA580C"/>
+            </linearGradient>
+          </defs>
+          <path d="M 25 115 A 85 85 0 0 1 195 115" fill="none" class="g-track" stroke-width="24" stroke-linecap="round"/>
+          <line x1="110" y1="17" x2="110" y2="43" class="g-tick"/>
+          <path id="pv1Arc" d="" fill="none" stroke="url(#pv1Grad)" stroke-width="24" stroke-linecap="round"/>
+          <path id="pv2Arc" d="" fill="none" stroke="url(#pv2Grad)" stroke-width="24" stroke-linecap="round"/>
+          <text x="6" y="142" text-anchor="start" class="gauge-limit">PV1</text>
+          <text x="110" y="11" text-anchor="middle" class="gauge-zero">0</text>
+          <text x="214" y="142" text-anchor="end" class="gauge-limit">PV2</text>
+          <text id="solarGaugeVal" x="110" y="88" text-anchor="middle" class="gauge-value">0 W</text>
+          <text id="solarGaugeLabel" x="110" y="106" text-anchor="middle" class="gauge-label">Total</text>
+        </svg>
+        <svg class="spark solar" viewBox="0 0 200 40" preserveAspectRatio="none" aria-hidden="true"><path id="spSolar" d=""/></svg>
+        <div class="gauge-details gauge-details-3col">
+          <div class="detail-item" title="PV string 1 power output."><span class="detail-label">PV1</span><span id="pv1Watt" class="detail-value">-- W</span></div>
+          <div class="detail-item" title="PV string 1 DC voltage."><span class="detail-label">PV1 V</span><span id="pv1Volt" class="detail-value">-- V</span></div>
+          <div class="detail-item" title="PV string 1 DC current."><span class="detail-label">PV1 A</span><span id="pv1Amp" class="detail-value">-- A</span></div>
+          <div class="detail-item" title="PV string 2 power output."><span class="detail-label">PV2</span><span id="pv2Watt" class="detail-value">-- W</span></div>
+          <div class="detail-item" title="PV string 2 DC voltage."><span class="detail-label">PV2 V</span><span id="pv2Volt" class="detail-value">-- V</span></div>
+          <div class="detail-item" title="PV string 2 DC current."><span class="detail-label">PV2 A</span><span id="pv2Amp" class="detail-value">-- A</span></div>
+        </div>
+      </div>
+
+      <!-- Inverter Gauge (0 to 6kW) -->
+      <div class="card gauge-card" title="AC power output of the inverter. This is the total power the inverter delivers to the house and grid after DC-AC conversion.">
+        <h3 class="card-title">Inverter Output</h3>
+        <svg id="invGauge" viewBox="0 0 220 144" class="gauge-svg">
+          <defs>
+            <linearGradient id="invArcGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+              <stop offset="0%" stop-color="#A5B4FC"/>
+              <stop offset="100%" stop-color="#6366F1"/>
+            </linearGradient>
+          </defs>
+          <path d="M 25 115 A 85 85 0 0 1 195 115" fill="none" class="g-track" stroke-width="24" stroke-linecap="round"/>
+          <path id="invArc" d="" fill="none" stroke="url(#invArcGrad)" stroke-width="24" stroke-linecap="round"/>
+          <text x="6" y="142" text-anchor="start" class="gauge-limit">0</text>
+          <text x="214" y="142" text-anchor="end" class="gauge-limit">6 kW</text>
+          <text id="invGaugeVal" x="110" y="88" text-anchor="middle" class="gauge-value">0 W</text>
+          <text id="invGaugeLabel" x="110" y="106" text-anchor="middle" class="gauge-label">Output</text>
+        </svg>
+        <div class="gauge-details">
+          <div class="detail-item" title="Inverter AC output voltage."><span class="detail-label">Voltage</span><span id="invVolt" class="detail-value">-- V</span></div>
+          <div class="detail-item" title="Inverter AC output frequency."><span class="detail-label">Frequency</span><span id="invFreq" class="detail-value">-- Hz</span></div>
+          <div class="detail-item" title="Inverter AC output current."><span class="detail-label">Current</span><span id="invCurr" class="detail-value">-- A</span></div>
+          <div class="detail-item" title="Inverter parasitic self-consumption: power used internally for electronics, fans, logger. Computed as PV + battery + grid - load."><span class="detail-label">Self use</span><span id="invSelf" class="detail-value">-- W</span></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Energy Counters -->
+    <section class="card energy-card">
+      <h3 class="card-title" title="Cumulative energy counters for today, reset at midnight by the inverter.">Energy Today</h3>
+      <div class="energy-grid">
+        <div class="energy-item" title="Total solar energy produced today by both PV strings.">
+          <div class="energy-icon solar-icon-sm"></div>
+          <div class="energy-info">
+            <span class="energy-label">Produced</span>
+            <span id="dailyProd" class="energy-value">-- kWh</span>
+          </div>
+        </div>
+        <div class="energy-item" title="Total energy imported (bought) from the grid today.">
+          <div class="energy-icon import-icon-sm"></div>
+          <div class="energy-info">
+            <span class="energy-label">Bought</span>
+            <span id="dailyBought" class="energy-value">-- kWh</span>
+          </div>
+        </div>
+        <div class="energy-item" title="Total energy exported (sold) to the grid today.">
+          <div class="energy-icon export-icon-sm"></div>
+          <div class="energy-info">
+            <span class="energy-label">Sold</span>
+            <span id="dailySold" class="energy-value">-- kWh</span>
+          </div>
+        </div>
+        <div class="energy-item" title="Estimated total household energy consumption today: produced + bought - sold - battery charge + battery discharge.">
+          <div class="energy-icon load-icon-sm"></div>
+          <div class="energy-info">
+            <span class="energy-label">Consumed</span>
+            <span id="dailyCons" class="energy-value">-- kWh</span>
+          </div>
+        </div>
+        <div class="energy-item" title="Total energy stored into the battery today.">
+          <div class="energy-icon battchg-icon-sm"></div>
+          <div class="energy-info">
+            <span class="energy-label">Batt Charge</span>
+            <span id="dailyBattChg" class="energy-value">-- kWh</span>
+          </div>
+        </div>
+        <div class="energy-item" title="Total energy drawn from the battery today.">
+          <div class="energy-icon battdis-icon-sm"></div>
+          <div class="energy-info">
+            <span class="energy-label">Batt Discharge</span>
+            <span id="dailyBattDis" class="energy-value">-- kWh</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+
+  </div>
+
+  <script>
+    // Injected from Go template
+    const CONFIG = {
+      pollIntervalS: {{.PollIntervalS}},
+      battCapacityKWh: {{.BattCapacity}},
+      battMinSOC: {{.BattMinSOC}},
+      battMaxChargeW: {{.BattMaxChargeW}},
+      battMaxDischargeW: {{.BattMaxDischargeW}},
+      pvPerStringW: {{.PVPerStringW}},
+      maxOutputW: {{.MaxOutputW}},
+      teslaEnabled: {{.TeslaEnabled}},
+      teslaMaxAmps: {{.TeslaMaxAmps}},
+      teslaGridVoltage: {{.TeslaGridVoltage}},
+    };
+  </script>
+  <script src="/web/app.js?v={{.AssetVersion}}"></script>
+
+  <!-- Pairing dialog -->
+  <div id="pairBackdrop" class="modal-backdrop" style="display:none" role="dialog" aria-modal="true" aria-labelledby="pairTitle">
+    <div class="modal">
+      <div class="modal-header">
+        <h2 id="pairTitle">Pair with Tesla</h2>
+        <button type="button" class="modal-close" id="pairClose" aria-label="Close">&times;</button>
+      </div>
+      <div class="modal-body">
+        <p class="modal-lead">Enroll this controller as a <b>Phone Key</b> on the vehicle so it can send charging commands over BLE. A fresh key pair is generated on every pairing.</p>
+        <ol class="modal-steps">
+          <li>Click <b>Start pairing</b> below.</li>
+          <li>Walk to the car and sit inside (or stand nearby).</li>
+          <li>Tap your <b>NFC keycard</b> on the center-console tray.</li>
+          <li>Tap <b>Confirm</b> on the vehicle touchscreen.</li>
+        </ol>
+        <div class="modal-log" id="pairLog" style="display:none"></div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" id="pairCancel" class="modal-btn modal-btn-ghost">Cancel</button>
+        <button type="button" id="pairStart" class="modal-btn modal-btn-primary">Start pairing</button>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

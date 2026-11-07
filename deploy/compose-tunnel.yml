@@ -1,0 +1,38 @@
+# deye-monitor with a Cloudflare Tunnel (cloudflare_tunnel: true in config.yaml).
+#
+# cloudflared opens an outbound connection to Cloudflare, so no port is forwarded
+# and the Pi's address stays hidden. Cloudflare Access is the outer gate; the app
+# verifies the Access token itself (access_team_domain / access_aud in config.yaml).
+#
+# The tunnel token is a secret. It is read from /opt/deye-monitor/.env on the Pi
+# (docker compose loads that file automatically); deploy.ps1 never touches it and
+# it is not in git. Create it once on the Pi:
+#
+#   echo 'TUNNEL_TOKEN=<token from the Cloudflare dashboard>' > /opt/deye-monitor/.env
+#   chmod 600 /opt/deye-monitor/.env
+#
+# The tunnel's public hostname is set in the Cloudflare dashboard, with the
+# service http://localhost:8080 (cloudflared shares the host network).
+services:
+  deye-monitor:
+    image: deye-monitor:latest
+    volumes:
+      - ./config.yaml:/config.yaml:ro
+      - tesla-state:/state
+      - /var/run/dbus:/var/run/dbus
+    environment:
+      - TZ=${TZ:-UTC}      # set TZ=Area/City in the .env next to this file
+    restart: unless-stopped
+    network_mode: host
+    privileged: true
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    command: tunnel --no-autoupdate run
+    environment:
+      - TUNNEL_TOKEN=${TUNNEL_TOKEN:?TUNNEL_TOKEN is not set - create /opt/deye-monitor/.env}
+    restart: unless-stopped
+    network_mode: host
+
+volumes:
+  tesla-state:

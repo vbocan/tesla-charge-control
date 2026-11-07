@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Charging Decision Log</title>
+  <link rel="icon" type="image/png" href="/web/tesla-logo.png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <script>
+    // Use the theme chosen on the dashboard (or the system one) before first paint.
+    (function () {
+      var t = null;
+      try { t = localStorage.getItem('theme'); } catch (e) {}
+      if (t !== 'light' && t !== 'dark') {
+        t = window.matchMedia && matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+      }
+      document.documentElement.setAttribute('data-theme', t);
+    })();
+  </script>
+  <style>
+    :root {
+      --bg: #0B1020;
+      --bg2: #11182E;
+      --card: rgba(255,255,255,.055);
+      --card-b: rgba(255,255,255,.09);
+      --text: #EAF0FF;
+      --muted: #8A96B5;
+      --dim: #5B6788;
+      --track: rgba(255,255,255,.09);
+      --row-hover: rgba(255,255,255,.04);
+      --shadow: 0 10px 30px rgba(0,0,0,.18);
+      --page-glow-1: #1b2a5a55;
+      --page-glow-2: #3b1d6a40;
+      --st-charging: #38BDF8;
+      --st-waiting: #FBBF24;
+      --st-stopping: #FB923C;
+      --st-error: #F87171;
+      --st-user: #A78BFA;
+      --btn-bg: rgba(56,189,248,.14);
+      --btn-fg: #38BDF8;
+      --btn-bd: rgba(56,189,248,.4);
+      color-scheme: dark;
+    }
+    :root[data-theme="light"] {
+      --bg: #EEF2FB;
+      --bg2: #FFFFFF;
+      --card: rgba(255,255,255,.88);
+      --card-b: rgba(20,30,70,.09);
+      --text: #121A33;
+      --muted: #5A6688;
+      --dim: #8B95B3;
+      --track: rgba(20,30,70,.09);
+      --row-hover: rgba(20,30,70,.04);
+      --shadow: 0 6px 22px rgba(30,40,90,.10);
+      --page-glow-1: #c7d6ff99;
+      --page-glow-2: #e6d7ff66;
+      --st-charging: #0369A1;
+      --st-waiting: #B45309;
+      --st-stopping: #C2410C;
+      --st-error: #B91C1C;
+      --st-user: #6D28D9;
+      --btn-bg: #DBEAFE;
+      --btn-fg: #1D4ED8;
+      --btn-bd: #BFDBFE;
+      color-scheme: light;
+    }
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      color: var(--text);
+      background:
+        radial-gradient(1200px 600px at 12% -10%, var(--page-glow-1), transparent 60%),
+        radial-gradient(900px 500px at 100% 0%, var(--page-glow-2), transparent 60%),
+        var(--bg);
+      background-attachment: fixed;
+      line-height: 1.5;
+      min-height: 100vh;
+      padding: 18px 16px 40px;
+      -webkit-font-smoothing: antialiased;
+    }
+    .container { max-width: 1180px; margin: 0 auto; }
+    .header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 14px;
+      padding: 4px 2px 14px;
+    }
+    .header h1 { font-size: 1.1rem; font-weight: 650; letter-spacing: -0.01em; }
+    .header a {
+      font-size: 0.8rem;
+      color: var(--muted);
+      text-decoration: none;
+      font-weight: 500;
+      white-space: nowrap;
+      padding: 6px 12px;
+      border-radius: 10px;
+      border: 1px solid var(--card-b);
+      background: var(--card);
+    }
+    .header a:hover { color: var(--text); }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--card-b);
+      border-radius: 20px;
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(14px);
+      -webkit-backdrop-filter: blur(14px);
+      padding: 16px 18px;
+      overflow-x: auto;
+    }
+    .toolbar {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 12px;
+      flex-wrap: wrap;
+    }
+    .toolbar label {
+      font-size: 0.72rem;
+      color: var(--muted);
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+    .toolbar select, .toolbar input {
+      font-family: inherit;
+      font-size: 0.8rem;
+      padding: 5px 10px;
+      border: 1px solid var(--card-b);
+      border-radius: 10px;
+      background: var(--track);
+      color: var(--text);
+    }
+    .toolbar select option { background: var(--bg2); color: var(--text); }
+    .toolbar button {
+      font-family: inherit;
+      font-size: 0.8rem;
+      padding: 5px 16px;
+      border: 1px solid var(--btn-bd);
+      border-radius: 999px;
+      background: var(--btn-bg);
+      color: var(--btn-fg);
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .toolbar button:hover { filter: brightness(1.12); }
+    .count {
+      font-size: 0.75rem;
+      color: var(--muted);
+      margin-left: auto;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.8rem;
+    }
+    th {
+      text-align: left;
+      font-size: 0.68rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--muted);
+      padding: 8px 10px;
+      border-bottom: 1px solid var(--card-b);
+      position: sticky;
+      top: 0;
+      background: var(--bg2);
+      white-space: nowrap;
+      cursor: pointer;
+      user-select: none;
+    }
+    th:hover { color: var(--text); }
+    td {
+      padding: 7px 10px;
+      border-bottom: 1px dashed var(--card-b);
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+    }
+    tr:hover td { background: var(--row-hover); }
+    .status-charging { color: var(--st-charging); font-weight: 600; }
+    .status-waiting  { color: var(--st-waiting); font-weight: 600; }
+    .status-stopping { color: var(--st-stopping); font-weight: 600; }
+    .status-idle     { color: var(--muted); }
+    .status-error    { color: var(--st-error); font-weight: 600; }
+    .source-user { color: var(--st-user); font-weight: 600; }
+    .source-auto { color: var(--muted); }
+    td.reason { white-space: normal; min-width: 250px; color: var(--muted); }
+    .empty {
+      text-align: center;
+      padding: 40px;
+      color: var(--muted);
+      font-size: 0.9rem;
+    }
+    @media (max-width: 480px) {
+      body { padding: 12px 12px 32px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+  <div class="header">
+    <a href="/">&larr; Back to dashboard</a>
+    <h1>Charging Decision Log</h1>
+  </div>
+  <div class="card">
+    <div class="toolbar">
+      <label>Filter status:</label>
+      <select id="filterStatus">
+        <option value="">All</option>
+        <option value="charging">Charging</option>
+        <option value="waiting">Waiting</option>
+        <option value="stopping">Stopping</option>
+        <option value="idle">Idle</option>
+        <option value="error">Error</option>
+      </select>
+      <label>Filter mode:</label>
+      <select id="filterMode">
+        <option value="">All</option>
+        <option value="solar">Solar</option>
+        <option value="forced">Forced</option>
+        <option value="off">Off</option>
+      </select>
+      <label>Source:</label>
+      <select id="filterSource">
+        <option value="">All</option>
+        <option value="user">User</option>
+        <option value="auto">Auto</option>
+      </select>
+      <button id="refreshBtn">Refresh</button>
+      <span id="logCount" class="count"></span>
+    </div>
+    <div id="logBody"></div>
+  </div>
+  </div>
+  <script>
+    let allEntries = [];
+
+    function loadLog() {
+      fetch('/api/tesla/log?limit=500')
+        .then(r => r.json())
+        .then(entries => {
+          allEntries = entries || [];
+          renderLog();
+        })
+        .catch(err => {
+          document.getElementById('logBody').innerHTML =
+            '<p class="empty">Error: ' + err.message + '</p>';
+        });
+    }
+
+    function renderLog() {
+      const statusFilter = document.getElementById('filterStatus').value;
+      const modeFilter = document.getElementById('filterMode').value;
+      const sourceFilter = document.getElementById('filterSource').value;
+
+      let filtered = allEntries;
+      if (statusFilter) filtered = filtered.filter(e => e.status === statusFilter);
+      if (modeFilter) filtered = filtered.filter(e => e.mode === modeFilter);
+      if (sourceFilter) filtered = filtered.filter(e => e.source === sourceFilter);
+
+      document.getElementById('logCount').textContent =
+        filtered.length + ' of ' + allEntries.length + ' entries';
+
+      if (filtered.length === 0) {
+        document.getElementById('logBody').innerHTML =
+          '<p class="empty">No matching log entries.</p>';
+        return;
+      }
+
+      let html = '<table><thead><tr>';
+      html += '<th>Timestamp</th><th>Source</th><th>Mode</th><th>Status</th>';
+      html += '<th>Amps</th><th>Power</th><th>Available</th><th>Reason</th>';
+      html += '</tr></thead><tbody>';
+
+      filtered.forEach(e => {
+        const cls = 'status-' + e.status;
+        const srcCls = 'source-' + (e.source || 'auto');
+        const srcLabel = (e.source || 'auto') === 'user' ? 'USER' : 'auto';
+        const mode = e.mode.replace(/_/g, ' ');
+        html += '<tr>';
+        html += '<td>' + e.ts + '</td>';
+        html += '<td class="' + srcCls + '">' + srcLabel + '</td>';
+        html += '<td>' + mode + '</td>';
+        html += '<td class="' + cls + '">' + e.status + '</td>';
+        html += '<td>' + e.amps + ' A</td>';
+        html += '<td>' + e.power_w + ' W</td>';
+        html += '<td>' + e.available_w + ' W</td>';
+        html += '<td class="reason">' + e.reason + '</td>';
+        html += '</tr>';
+      });
+
+      html += '</tbody></table>';
+      document.getElementById('logBody').innerHTML = html;
+    }
+
+    document.getElementById('filterStatus').addEventListener('change', renderLog);
+    document.getElementById('filterMode').addEventListener('change', renderLog);
+    document.getElementById('filterSource').addEventListener('change', renderLog);
+    document.getElementById('refreshBtn').addEventListener('click', loadLog);
+    loadLog();
+  </script>
+</body>
+</html>

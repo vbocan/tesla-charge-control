@@ -1,0 +1,10 @@
+.git
+.claude
+.github
+docs
+*.tar
+*.exe
+*.zip
+.env
+# Your real configuration never goes into an image layer.
+config.yaml
