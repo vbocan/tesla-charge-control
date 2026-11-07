@@ -251,6 +251,7 @@ type backoffRig struct {
 	held      atomic.Int32 // ops held back by the backoff
 	processed atomic.Int32 // ops the worker has finished with, either way
 	fail      atomic.Bool
+	full      atomic.Bool // the car answers every op with ErrChargeComplete
 }
 
 func newBackoffRig(t *testing.T) *backoffRig {
@@ -259,6 +260,9 @@ func newBackoffRig(t *testing.T) *backoffRig {
 	r.fail.Store(true)
 	r.q = newBLEQueue(func(bleOp) error {
 		r.execs.Add(1)
+		if r.full.Load() {
+			return ErrChargeComplete
+		}
 		if r.fail.Load() {
 			return errors.New("car not reachable")
 		}
@@ -353,4 +357,30 @@ func TestQueueClearEndsBackoff(t *testing.T) {
 	r.q.Clear() // e.g. the user changed mode
 	r.submit(t, start)
 	r.expect(t, 3, 1)
+}
+
+// A car at its charge limit refusing a start has answered: the link works. That
+// ends any back-off, and the same start is not re-sent straight away.
+func TestQueueTreatsChargeLimitAsAnAnswer(t *testing.T) {
+	r := newBackoffRig(t)
+	start := bleOp{kind: opStart, amps: 20}
+
+	r.submit(t, start)
+	r.submit(t, start) // 2nd failure: backing off for 10s
+	r.expect(t, 2, 0)
+
+	r.full.Store(true)
+	r.clk.Advance(11 * time.Second)
+	r.submit(t, start) // runs; the car says it is full
+	r.expect(t, 3, 0)
+
+	r.q.mu.Lock()
+	streak, retryAfter, applied := r.q.failStreak, r.q.retryAfter, r.q.applied
+	r.q.mu.Unlock()
+	if streak != 0 || !retryAfter.IsZero() {
+		t.Errorf("fail streak %d, retry after %v: a full car must not count as a link failure", streak, retryAfter)
+	}
+	if applied == nil || !applied.sameAs(start) {
+		t.Errorf("applied = %v, want the refused start, so an identical request is not re-sent at once", applied)
+	}
 }

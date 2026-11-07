@@ -197,6 +197,13 @@ type Charger struct {
 	bleErrAt    time.Time // when bleErr was recorded
 	startFailed bool      // a start command failed and Evaluate hasn't acted on it yet
 	startOK     bool      // a start command succeeded and Evaluate hasn't seen it yet
+	startFull   bool      // the car refused a start because it is at its charge limit; Evaluate hasn't seen it yet
+
+	// The car refused ChargeStart because charging is complete (see
+	// checkChargeLimit). Guarded by mu.
+	atLimit      bool      // holding off: no start is sent until something changes
+	atLimitAt    time.Time // when the refusal was seen
+	atLimitLimit int       // the car's charge limit as last read then; 0 if unknown
 
 	// Idle-mode load guard (see guard.go).
 	guarding      bool      // the car is charging on its own and Idle mode keeps it under the load limit
@@ -721,6 +728,14 @@ func (c *Charger) evalSolar(data deye.InverterData) {
 	maxAmps := c.cfg.MaxAmps
 	startThresholdW := minAmps*c.cfg.GridVoltage + 50 // 5A * 230V + 50W margin = 1200W
 
+	// A full car refuses every start; asking again each cycle (the start retry,
+	// the contactor recovery) would only keep the radio busy and the status in
+	// error. Wait in idle until there is room again.
+	if c.checkChargeLimit() {
+		c.holdAtLimit()
+		return
+	}
+
 	switch c.modeState {
 	case StateStandby:
 		c.status = StatusWaiting
@@ -976,6 +991,13 @@ func (c *Charger) evalMax(data deye.InverterData) {
 	// start-failure to act on — just discard the flag.
 	c.takeStartFailed()
 
+	// Max mode re-requests the start every cycle; a full car refuses each one.
+	// Stop asking until the limit is raised or the battery has room again.
+	if c.checkChargeLimit() {
+		c.holdAtLimit()
+		return
+	}
+
 	// After the load cap stopped the charge, stay stopped for a while.
 	if !c.overloadPausedAt.IsZero() {
 		if remaining := maxResumeHoldoff - time.Since(c.overloadPausedAt); remaining > 0 {
@@ -1064,6 +1086,84 @@ func (c *Charger) evalMax(data deye.InverterData) {
 	} else {
 		c.reason = "Max charge at " + itoa(c.currentAmps) + "A (max " + itoa(c.cfg.MaxAmps) + "A)"
 	}
+}
+
+// --- Charge limit ---
+//
+// A car at its charge limit answers ChargeStart with "complete". That is the
+// car's normal state, not a fault: the active mode goes idle and stops sending
+// starts until something suggests the car would take charge again — the wall
+// connector shows it charging (it restarted on its own, e.g. after the limit was
+// raised), or a SoC reading taken after the refusal shows a raised limit or room
+// below it. A mode change or unplugging the car also starts afresh (resetBLE).
+// Without a fresh reading the car is not asked again, so at worst it is asked
+// once per SoC poll.
+
+// checkChargeLimit takes in any new charge-limit refusal and reports whether
+// charging is being held because the car is full. Caller holds mu.
+func (c *Charger) checkChargeLimit() bool {
+	cs, csAt := c.cachedChargeState()
+	if c.takeStartFull() {
+		if !c.atLimit {
+			log.Printf("[TESLA] Car is at its charge limit — not asking it to start again until that changes")
+		}
+		c.atLimit = true
+		c.atLimitAt = time.Now()
+		c.atLimitLimit = 0
+		if cs != nil {
+			c.atLimitLimit = cs.ChargeLimitSoc
+		}
+	}
+	if !c.atLimit {
+		return false
+	}
+	switch {
+	case c.twc != nil && c.twc.IsCharging():
+		log.Printf("[TESLA] Car is charging again — leaving the charge-limit hold")
+	case cs != nil && csAt.After(c.atLimitAt) && roomToCharge(cs, c.atLimitLimit):
+		log.Printf("[TESLA] Car has room to charge (SoC %d%%, limit %d%%, %s) — leaving the charge-limit hold",
+			cs.BatteryLevel, cs.ChargeLimitSoc, cs.ChargingState)
+	default:
+		return true
+	}
+	c.atLimit = false
+	// The queue remembers the refused start as applied and would hold back an
+	// identical one for a while; the car's situation changed, so ask now.
+	c.queue.Clear()
+	return false
+}
+
+// roomToCharge reports whether a SoC reading says the car would take charge
+// again: its limit went up since the refusal (limitAtRefusal, 0 if unknown), or
+// the battery is below the limit and the car no longer calls itself complete.
+func roomToCharge(cs *VehicleChargeState, limitAtRefusal int) bool {
+	if limitAtRefusal > 0 && cs.ChargeLimitSoc > limitAtRefusal {
+		return true
+	}
+	return cs.ChargingState != "Complete" && cs.BatteryLevel < cs.ChargeLimitSoc
+}
+
+// holdAtLimit puts the active mode in idle while the car is at its charge
+// limit. Nothing is sent: the car isn't charging. Caller holds mu.
+func (c *Charger) holdAtLimit() {
+	c.modeState = StateIdle
+	c.startRetry = false
+	c.contactorOpenSince = time.Time{}
+	c.currentAmps = 0
+	c.status = StatusIdle
+	c.reason = "Car at its charge limit"
+	if cs, _ := c.cachedChargeState(); cs != nil && cs.ChargeLimitSoc > 0 {
+		c.reason += " (" + itoa(cs.ChargeLimitSoc) + "%)"
+	}
+	c.reason += " — charging resumes when the limit is raised"
+}
+
+// cachedChargeState is the last SoC reading and when it was taken; nil if there
+// is none. Caller may hold mu.
+func (c *Charger) cachedChargeState() (*VehicleChargeState, time.Time) {
+	c.chargeMu.RLock()
+	defer c.chargeMu.RUnlock()
+	return c.chargeState, c.chargeStateAt
 }
 
 // --- SoC polling ---
@@ -1266,8 +1366,10 @@ func (c *Charger) resetBLE() {
 	c.bleErr = nil
 	c.startFailed = false
 	c.startOK = false
+	c.startFull = false
 	c.resMu.Unlock()
 	c.startRetry = false
+	c.atLimit = false
 }
 
 // RunBLEWorker performs queued car commands, one at a time, until ctx is
@@ -1312,17 +1414,27 @@ func (c *Charger) onBLEResult(op bleOp, err error) {
 		}
 		return
 	}
+	if errors.Is(err, ErrChargeComplete) {
+		// The car answered; it is full. The link works, so clear any error, and
+		// tell Evaluate to stop asking (see checkChargeLimit).
+		c.bleErr = nil
+		if op.kind == opStart {
+			c.startFull, c.startOK, c.startFailed = true, false, false
+		}
+		log.Printf("[TESLA] BLE %s: car is at its charge limit", op)
+		return
+	}
 	if err == nil {
 		c.bleErr = nil
 		if op.kind == opStart {
 			// Latest outcome wins if Evaluate hasn't looked at an earlier one yet.
-			c.startOK, c.startFailed = true, false
+			c.startOK, c.startFailed, c.startFull = true, false, false
 		}
 		return
 	}
 	c.bleErr, c.bleErrAt = err, time.Now()
 	if op.kind == opStart {
-		c.startFailed, c.startOK = true, false
+		c.startFailed, c.startOK, c.startFull = true, false, false
 	}
 	log.Printf("[TESLA] BLE %s failed: %v", op, err)
 }
@@ -1355,6 +1467,16 @@ func (c *Charger) takeStartOK() bool {
 	ok := c.startOK
 	c.startOK = false
 	return ok
+}
+
+// takeStartFull reports, and clears, whether the car refused a start because it
+// is at its charge limit since the last call.
+func (c *Charger) takeStartFull() bool {
+	c.resMu.Lock()
+	defer c.resMu.Unlock()
+	full := c.startFull
+	c.startFull = false
+	return full
 }
 
 // bleErrorReason returns a user-friendly error message for BLE failures.
@@ -1398,7 +1520,7 @@ func (c *Charger) smoothedAvg() float64 {
 
 // computeTargetAmps returns what amps we'd set (for UI display).
 func (c *Charger) computeTargetAmps() int {
-	if c.mode == ModeIdle {
+	if c.mode == ModeIdle || c.atLimit {
 		return 0
 	}
 	if c.mode == ModeMax {

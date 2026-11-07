@@ -41,6 +41,18 @@ import (
 // "was already charging".
 var ErrAlreadyCharging = errors.New("car is already charging")
 
+// ErrChargeComplete is returned by StartCharging when the car refuses to start
+// because charging is complete: the battery is at (or above) its charge limit.
+// The command reached the car and the link is fine; the car simply has no room.
+var ErrChargeComplete = errors.New("car is at its charge limit")
+
+// isChargeCompleteRefusal reports whether err is the car's "complete" answer to
+// ChargeStart. vehicle-command reports it as a NominalError whose text is the
+// car's plain-text reason: "car could not execute command: complete".
+func isChargeCompleteRefusal(err error) bool {
+	return err != nil && strings.HasSuffix(strings.TrimSpace(err.Error()), "could not execute command: complete")
+}
+
 // ErrPreempted is returned by background BLE work (SoC reads, wake-up) that was
 // aborted so a charging-control command could use the radio instead.
 var ErrPreempted = errors.New("preempted by a control command")
@@ -271,6 +283,14 @@ func (b *BLEClient) sendCommand(parent context.Context, name string, call bleCal
 			}
 			return nil
 		}
+		if isChargeCompleteRefusal(err) {
+			// The car answered: charging is complete. Not a link failure.
+			log.Printf("[TESLA] %s: car is at its charge limit (OK)", name)
+			if b.store != nil {
+				b.store.LogBLECommand(name, nil)
+			}
+			return ErrChargeComplete
+		}
 		cmdErr := fmt.Errorf("%s: %w", name, err)
 		if b.store != nil {
 			b.store.LogBLECommand(name, cmdErr)
@@ -314,8 +334,16 @@ func (b *BLEClient) SetChargingAmps(amps int, urgent bool) error {
 // StartCharging tells the car to begin charging.
 // Returns (true, nil) if the car was already charging (someone else started it).
 // Returns (false, nil) if we successfully started a fresh charge session.
+// Returns ErrChargeComplete if the car is at its charge limit and won't start.
 func (b *BLEClient) StartCharging() (bool, error) {
 	if b.dryRun {
+		// A simulated car (the demo) refuses like a real one once it is full.
+		if b.dryRunState != nil {
+			if cs := b.dryRunState(); cs != nil && cs.BatteryLevel >= cs.ChargeLimitSoc {
+				log.Printf("[TESLA DRY RUN] Start charging: car is at its charge limit")
+				return false, ErrChargeComplete
+			}
+		}
 		log.Printf("[TESLA DRY RUN] Start charging")
 		return false, nil
 	}

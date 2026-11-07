@@ -3,11 +3,15 @@ package tesla
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/vbocan/tesla-charge-control/deye"
+
+	"github.com/teslamotors/vehicle-command/pkg/protocol"
 )
 
 // opSink stands in for the BLE worker's executor: it records every op the
@@ -15,7 +19,8 @@ import (
 type opSink struct {
 	ops     chan bleOp
 	release chan struct{} // when non-nil, exec blocks until it is closed
-	err     error         // returned from exec
+	mu      sync.Mutex
+	err     error // returned from exec; set it before the first command, or use setErr
 }
 
 func (s *opSink) exec(op bleOp) error {
@@ -23,7 +28,16 @@ func (s *opSink) exec(op bleOp) error {
 		<-s.release
 	}
 	s.ops <- op
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	return s.err
+}
+
+// setErr changes what exec returns while the worker is running.
+func (s *opSink) setErr(err error) {
+	s.mu.Lock()
+	s.err = err
+	s.mu.Unlock()
 }
 
 // next returns the next queued op, failing the test if none arrives.
@@ -473,5 +487,229 @@ func TestCarVoltsPrefersMeasurements(t *testing.T) {
 				t.Errorf("carVolts = %d, want %d", got, tc.want)
 			}
 		})
+	}
+}
+
+// --- Charge limit ---
+
+// setCar stores a SoC reading as if the poller had taken it at the given time.
+func setCar(c *Charger, cs *VehicleChargeState, at time.Time) {
+	c.chargeMu.Lock()
+	c.chargeState, c.chargeStateAt = cs, at
+	c.chargeMu.Unlock()
+}
+
+// refusalSeen reports whether a "car is full" answer is waiting for Evaluate.
+func (c *Charger) refusalSeen() bool {
+	c.resMu.Lock()
+	defer c.resMu.Unlock()
+	return c.startFull
+}
+
+// fullCar is a car sitting at its 60 % charge limit.
+func fullCar() *VehicleChargeState {
+	return &VehicleChargeState{BatteryLevel: 60, ChargeLimitSoc: 60, ChargingState: "Complete"}
+}
+
+// refuseFirstStart runs one cycle whose start the car refuses as full, and
+// waits until the refusal is back.
+func refuseFirstStart(t *testing.T, c *Charger, sink *opSink, data deye.InverterData) {
+	t.Helper()
+	sink.setErr(ErrChargeComplete)
+	c.Evaluate(data)
+	if op := sink.next(t); op.kind != opStart {
+		t.Fatalf("queued %v, want a start", op)
+	}
+	waitFor(t, "the refusal to come back", c.refusalSeen)
+}
+
+// assertHeldAtLimit checks the charger shows a calm idle at the charge limit and
+// queues nothing over a few cycles.
+func assertHeldAtLimit(t *testing.T, c *Charger, sink *opSink, data deye.InverterData) {
+	t.Helper()
+	for range 3 {
+		c.Evaluate(data)
+		s := c.GetStatus()
+		if s.Status != StatusIdle || !strings.Contains(s.Reason, "charge limit") {
+			t.Fatalf("status %q / reason %q, want idle at the charge limit", s.Status, s.Reason)
+		}
+		if s.CurrentAmps != 0 || s.TargetAmps != 0 {
+			t.Errorf("current %dA / target %dA at the charge limit, want 0", s.CurrentAmps, s.TargetAmps)
+		}
+	}
+	sink.none(t)
+	if err := c.recentBLEError(); err != nil {
+		t.Errorf("a full car is not a BLE error, got %v", err)
+	}
+}
+
+// The live bug: at its 60 % limit the car answers ChargeStart with "complete".
+// Max mode took that for a failure and asked again every few seconds, keeping
+// the radio busy and the dashboard in error.
+func TestMaxModeGoesIdleAtTheChargeLimit(t *testing.T) {
+	c, sink := newTestCharger(t, ModeMax)
+	data := deye.InverterData{LoadPower: 1000}
+
+	refuseFirstStart(t, c, sink, data)
+	assertHeldAtLimit(t, c, sink, data)
+}
+
+// With a SoC reading the reason names the limit, and only a reading taken after
+// the refusal that shows room (a raised limit) lets Max mode start again.
+func TestMaxModeResumesWhenTheLimitIsRaised(t *testing.T) {
+	c, sink := newTestCharger(t, ModeMax)
+	data := deye.InverterData{LoadPower: 1000}
+	setCar(c, fullCar(), time.Now().Add(-time.Minute))
+
+	refuseFirstStart(t, c, sink, data)
+	assertHeldAtLimit(t, c, sink, data)
+	if r := c.GetStatus().Reason; !strings.Contains(r, "(60%)") {
+		t.Errorf("reason %q should name the 60%% limit", r)
+	}
+
+	// A fresh reading that still says full changes nothing.
+	setCar(c, fullCar(), time.Now().Add(time.Millisecond))
+	assertHeldAtLimit(t, c, sink, data)
+
+	// The owner raises the limit to 80 %.
+	sink.setErr(nil)
+	setCar(c, &VehicleChargeState{BatteryLevel: 60, ChargeLimitSoc: 80, ChargingState: "Stopped"}, time.Now().Add(time.Millisecond))
+	c.Evaluate(data)
+	if op := sink.next(t); op.kind != opStart {
+		t.Fatalf("queued %v after the limit was raised, want a start", op)
+	}
+	if s := c.GetStatus(); s.Status != StatusCharging {
+		t.Errorf("status %q after resuming, want charging", s.Status)
+	}
+}
+
+// A battery that has dropped below its limit resumes too, but only on a reading
+// taken after the refusal: an older one may be what the car just contradicted.
+func TestMaxModeResumesWhenTheBatteryHasRoom(t *testing.T) {
+	c, sink := newTestCharger(t, ModeMax)
+	data := deye.InverterData{LoadPower: 1000}
+	room := &VehicleChargeState{BatteryLevel: 55, ChargeLimitSoc: 60, ChargingState: "Stopped"}
+	setCar(c, room, time.Now().Add(-time.Minute))
+
+	refuseFirstStart(t, c, sink, data)
+	assertHeldAtLimit(t, c, sink, data)
+
+	sink.setErr(nil)
+	setCar(c, room, time.Now().Add(time.Millisecond))
+	c.Evaluate(data)
+	if op := sink.next(t); op.kind != opStart {
+		t.Fatalf("queued %v with room in the battery, want a start", op)
+	}
+}
+
+// If the car starts charging by itself (the limit was raised from the app), Max
+// mode picks the session up and manages its current again.
+func TestMaxModeResumesWhenTheCarChargesAgain(t *testing.T) {
+	c, sink := newTestCharger(t, ModeMax)
+	c.twc = pluggedTWC()
+	data := deye.InverterData{LoadPower: 1000}
+
+	refuseFirstStart(t, c, sink, data)
+	assertHeldAtLimit(t, c, sink, data)
+
+	sink.setErr(nil)
+	c.twc = chargingTWC(16)
+	c.Evaluate(deye.InverterData{LoadPower: 1000 + 16*230})
+	if op := sink.next(t); op.kind != opSetAmps {
+		t.Fatalf("queued %v once the car charges again, want a current change", op)
+	}
+}
+
+// Choosing a mode again asks the car afresh.
+func TestModeChangeEndsTheChargeLimitHold(t *testing.T) {
+	c, sink := newTestCharger(t, ModeMax)
+	data := deye.InverterData{LoadPower: 1000}
+
+	refuseFirstStart(t, c, sink, data)
+	assertHeldAtLimit(t, c, sink, data)
+
+	sink.setErr(nil)
+	c.SetMode(ModeMax)
+	c.Evaluate(data)
+	if op := sink.next(t); op.kind != opStart {
+		t.Fatalf("queued %v after the mode was chosen again, want a start", op)
+	}
+}
+
+// Solar mode had the same loop through its start retry and contactor recovery.
+// A full car must leave it idle, even with plenty of surplus for a fast start.
+func TestSolarModeGoesIdleAtTheChargeLimit(t *testing.T) {
+	c, sink := newTestCharger(t, ModeSolar)
+	c.twc = pluggedTWC()
+	c.modeState = StateStarting
+	c.startingAt = time.Now().Add(-10 * time.Minute) // start delay long elapsed
+	data := deye.InverterData{GridPower: -4000, LoadPower: 500, TotalPV: 4500}
+
+	refuseFirstStart(t, c, sink, data)
+	assertHeldAtLimit(t, c, sink, data)
+	if s := c.GetStatus().ModeState; s != StateIdle {
+		t.Errorf("mode state %q at the charge limit, want %q", s, StateIdle)
+	}
+}
+
+func TestRoomToCharge(t *testing.T) {
+	tests := []struct {
+		name  string
+		cs    VehicleChargeState
+		limit int // limit when the car refused; 0 if unknown
+		want  bool
+	}{
+		{"still full", VehicleChargeState{BatteryLevel: 60, ChargeLimitSoc: 60, ChargingState: "Complete"}, 60, false},
+		{"above the limit", VehicleChargeState{BatteryLevel: 62, ChargeLimitSoc: 60, ChargingState: "Stopped"}, 60, false},
+		{"limit raised", VehicleChargeState{BatteryLevel: 60, ChargeLimitSoc: 80, ChargingState: "Complete"}, 60, true},
+		{"battery dropped", VehicleChargeState{BatteryLevel: 55, ChargeLimitSoc: 60, ChargingState: "Stopped"}, 60, true},
+		{"just under but the car calls it complete", VehicleChargeState{BatteryLevel: 59, ChargeLimitSoc: 60, ChargingState: "Complete"}, 60, false},
+		{"room, limit unknown at refusal", VehicleChargeState{BatteryLevel: 50, ChargeLimitSoc: 80, ChargingState: "Stopped"}, 0, true},
+		{"limit lowered", VehicleChargeState{BatteryLevel: 60, ChargeLimitSoc: 50, ChargingState: "Stopped"}, 60, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := roomToCharge(&tc.cs, tc.limit); got != tc.want {
+				t.Errorf("roomToCharge = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// The car's "complete" answer arrives from vehicle-command as a NominalError
+// carrying its plain-text reason; it must be told apart from real failures.
+func TestIsChargeCompleteRefusal(t *testing.T) {
+	refusal := func(reason string) error {
+		return &protocol.NominalError{Details: protocol.NewError("car could not execute command: "+reason, false, false)}
+	}
+	tests := []struct {
+		err  error
+		want bool
+	}{
+		{refusal("complete"), true},
+		{fmt.Errorf("ChargeStart: %w", refusal("complete")), true},
+		{refusal("is_charging"), false},
+		{refusal("disconnected"), false},
+		{errors.New("ble failed to enumerate device services"), false},
+		{nil, false},
+	}
+	for _, tc := range tests {
+		if got := isChargeCompleteRefusal(tc.err); got != tc.want {
+			t.Errorf("isChargeCompleteRefusal(%v) = %v, want %v", tc.err, got, tc.want)
+		}
+	}
+}
+
+// The demo's simulated car refuses a start once it is full, like a real one.
+func TestDryRunStartRefusesAFullCar(t *testing.T) {
+	b := NewBLEClient(true, "", "", nil, nil)
+	cs := &VehicleChargeState{BatteryLevel: 80, ChargeLimitSoc: 80, ChargingState: "Complete"}
+	b.dryRunState = func() *VehicleChargeState { return cs }
+	if _, err := b.StartCharging(); !errors.Is(err, ErrChargeComplete) {
+		t.Errorf("full car: StartCharging error %v, want ErrChargeComplete", err)
+	}
+	cs = &VehicleChargeState{BatteryLevel: 70, ChargeLimitSoc: 80, ChargingState: "Stopped"}
+	if _, err := b.StartCharging(); err != nil {
+		t.Errorf("car with room: StartCharging error %v, want nil", err)
 	}
 }

@@ -108,6 +108,15 @@ func (c *Charger) evalIdle(data deye.InverterData, carW int) {
 // restartStoppedCharge restarts a charge the guard stopped, once that is safe.
 // Caller holds mu.
 func (c *Charger) restartStoppedCharge(headroom, houseW int) {
+	if c.takeStartFull() {
+		// The car filled up while it was stopped (or was nearly full): it refuses
+		// the restart, and asking again would get the same answer.
+		log.Printf("[TESLA] Idle: the car is at its charge limit — leaving it alone")
+		c.endGuard()
+		c.status = StatusIdle
+		c.reason = "Idle — car at its charge limit"
+		return
+	}
 	if !c.overloadPausedAt.IsZero() {
 		if remaining := maxResumeHoldoff - time.Since(c.overloadPausedAt); remaining > 0 {
 			c.reason = "Idle — car stopped for overload, restarting in " + itoa(int(remaining.Seconds())+1) + "s"

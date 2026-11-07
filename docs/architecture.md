@@ -88,6 +88,8 @@ The `send*` helpers only record *intent* in `cycleOp`; merging happens within th
 - **Car First** subtracts the battery's *net* flow (charging adds, discharging subtracts), so energy that would top up the home battery goes to the car instead, while the grid, not the battery, covers any shortfall. Export is still included so the loop has a signal once the battery is full.
 - **Max** charges at the highest current the inverter budget allows, from any source. It raises the current only when there is room for at least 2 A more (`maxRaiseDeadbandAmps`) so the target doesn't flip-flop, and after a load-cap stop it holds off 60 s before restarting.
 
+**At the charge limit.** A car at (or above) its charge limit answers ChargeStart with "complete". That is a normal state, not a fault: every charging mode goes idle ("Car at its charge limit (60%)") and stops sending starts. It asks again only when something changes: the wall connector shows the car charging by itself, a SoC reading taken *after* the refusal shows a raised limit or a battery below the limit that the car no longer calls complete, the mode is chosen again, or the car is unplugged. Without a fresh reading the car is not asked again, so at worst it is asked once per SoC poll. In Idle mode the guard gives up restarting a stopped charge the car refuses as complete.
+
 The selected mode survives restarts (`state_file`). Unplugging the car always returns to Idle.
 
 ## 5. The Solar state machine
@@ -182,6 +184,7 @@ Bluetooth is slow and sometimes flaky; the control loop must never wait for it. 
 - Control commands have a ~15 s budget (10 s connect + 5 s command); a command that can't reach the car is abandoned and retried next cycle.
 - After two consecutive failures, non-urgent commands back off 10 s → 20 s → 40 s → 60 s. Any success, mode change or unplug resets the back-off.
 - Results flow back through `onBLEResult`: failures show as `status = error` while they persist; a failed start in Charging is retried in place.
+- The car's own refusals are answers, not failures: "already charging" / "already stopped" count as success, and "complete" (at the charge limit, `ErrChargeComplete`) neither shows an error nor feeds the back-off; the mode stops asking instead (§4).
 
 ### 7.2 Sessions
 
@@ -251,7 +254,7 @@ JSON endpoints: `GET /api/events` (SSE), `POST /api/tesla/mode`, `POST /api/tesl
 
 - a simulated **inverter** (`inverterSource` interface) with a clear-sky PV curve, passing clouds, appliances, and a battery that charges first and tapers above 90 %;
 - a fake **Wall Connector** HTTP server on 127.0.0.1 that reports what the simulated car draws;
-- a **car** in dry-run mode that follows the commanded current and fills its battery.
+- a **car** in dry-run mode that follows the commanded current, fills its battery and, like a real one, refuses to start once it reaches its limit.
 
 The charger, state machine, load cap, store and wall-connector client are the production code, and the loop is closed: the charger reacts to the car it controls. Delays are shortened (20 s start delay) so the story unfolds in a minute, and 24 hours of link history and a morning of decisions are seeded so every page has content.
 

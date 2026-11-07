@@ -196,7 +196,10 @@ func (q *bleQueue) runNext() bool {
 	q.mu.Lock()
 	q.inFlight = false
 	q.lastDone = q.now()
-	if err == nil {
+	// A car at its charge limit refusing the start is still an answer: the link
+	// works, so it must not feed the back-off, and the same start asked again
+	// straight away would only get the same answer.
+	if err == nil || errors.Is(err, ErrChargeComplete) {
 		q.applied = &op
 		q.appliedAt = q.lastDone
 		q.failStreak = 0

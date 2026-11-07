@@ -189,6 +189,39 @@ func TestIdleGuardGivesUpARestartTheCarRefuses(t *testing.T) {
 	}
 }
 
+// A car that filled up while the guard held it stopped refuses the restart; the
+// guard must take that as final instead of asking until it times out.
+func TestIdleGuardStopsRestartingAFullCar(t *testing.T) {
+	c, sink := newGuardCharger(t)
+	c.twc = chargingTWC(10)
+	c.Evaluate(house(5000 + 10*230))
+	sink.next(t) // the stop
+
+	c.twc = pluggedTWC()
+	c.overloadPausedAt = time.Now().Add(-maxResumeHoldoff - time.Second)
+	sink.setErr(ErrChargeComplete)
+	c.Evaluate(house(300))
+	if op := sink.next(t); op.kind != opStart {
+		t.Fatalf("queued %v, want the restart", op)
+	}
+	waitFor(t, "the refusal to come back", c.refusalSeen)
+
+	sink.setErr(nil)
+	c.Evaluate(house(300))
+	if c.guarding || c.guardStopped {
+		t.Error("still trying to restart a car at its charge limit")
+	}
+	if s := c.GetStatus(); s.Status != StatusIdle || !strings.Contains(s.Reason, "charge limit") {
+		t.Errorf("status %q / reason %q, want idle at the charge limit", s.Status, s.Reason)
+	}
+	// Ending the guard puts the car's own current setting back; nothing else.
+	if op := sink.next(t); op.kind != opSetAmps {
+		t.Errorf("queued %v, want the car's setting restored", op)
+	}
+	c.Evaluate(house(300))
+	sink.none(t)
+}
+
 // A charge stopped for a grid outage is restarted once the grid is stable.
 func TestIdleGuardRestartsAfterAGridOutage(t *testing.T) {
 	c, sink := newGuardCharger(t)
