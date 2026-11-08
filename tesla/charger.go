@@ -207,7 +207,9 @@ type Charger struct {
 
 	// Idle-mode load guard (see guard.go).
 	guarding      bool      // the car is charging on its own and Idle mode keeps it under the load limit
-	guardCeiling  int       // the car's own current setting when the guard took over; restored at the end
+	guardCeiling  int       // the car's own current setting, read over BLE; 0 until it is known
+	guardPeakA    int       // the most the wall connector measured the car drawing this session, A
+	guardTouched  bool      // the guard changed the car's current setting this session
 	guardStopped  bool      // the guard stopped the car (overload or outage) and restarts it when allowed
 	guardResumeAt time.Time // when the guard first tried to restart the car; zero if it hasn't
 
@@ -231,6 +233,7 @@ type Charger struct {
 	chargeMu       sync.RWMutex
 	chargeState    *VehicleChargeState
 	chargeStateAt  time.Time     // when chargeState was last refreshed
+	ampsSetAt      time.Time     // when the Pi last asked the car for a charging current (see carSetting)
 	lastSoCAttempt time.Time     // when a SoC read was last attempted (success or fail), for pacing
 	socRefresh     chan struct{} // user asked for a read now; see RefreshSoC
 }
@@ -1338,6 +1341,10 @@ func (c *Charger) sendStop() {
 // want records a requested car command for this cycle, merged with any earlier
 // request made in the same cycle. Caller holds mu.
 func (c *Charger) want(op bleOp) {
+	if c.guarding && op.kind != opStop {
+		// From here on a reading shows the Pi's value, not the car's own setting.
+		c.guardTouched = true
+	}
 	if c.cycleOp != nil {
 		op = mergeOps(*c.cycleOp, op)
 	}
@@ -1384,6 +1391,13 @@ func (c *Charger) execBLEOp(op bleOp) error {
 	// Take the radio from any SoC read or wake-up in progress rather than
 	// queueing behind it.
 	c.ble.PreemptBackground(op.urgent)
+
+	if op.kind == opSetAmps || op.kind == opStart {
+		// A reading taken before this no longer shows the car's current setting.
+		c.chargeMu.Lock()
+		c.ampsSetAt = time.Now()
+		c.chargeMu.Unlock()
+	}
 
 	switch op.kind {
 	case opSetAmps:

@@ -164,10 +164,11 @@ Without inverter data the Pi can neither enforce the load cap nor see an outage.
 
 In Idle mode the car charges on its own schedule, but the inverter still has to stay under its limit. With `idle_load_cap: true`:
 
-- When the contactor closes, the guard takes the car's own current setting (from the last SoC read) as its ceiling.
+- The guard **never starts a charge**. It acts only once the wall connector shows the contactor closed.
+- Its ceiling is the car's own current setting. A Bluetooth reading counts only if it was taken after the Pi last set a current; otherwise the guard asks the car right away. Until the answer arrives, it works from what the wall connector measures the car drawing, since a car can't draw more than its setting. A reading that arrives after the guard has changed the current is ignored: it would only echo the Pi's own value.
 - The §6.1 cap applies: reduce when the house needs room, raise again (never above the ceiling) when there is room for 2 A more, stop only if even 5 A doesn't fit.
 - A charge the guard stopped (overload, outage) is **restarted** by the guard once there is room / the grid is stable, since the car would not resume it. If the contactor hasn't closed after 2 minutes the guard gives up. A charge the car ended itself is left alone.
-- When the session ends, a lowered current setting is **restored** to the ceiling, because the car plans its next scheduled charge with whatever it was last told.
+- When the session ends, a current setting the guard changed is **restored**, because the car plans its next scheduled charge with whatever it was last told. It goes back to the setting it read, or, if that was never read, to the most the car was measured drawing. A stop alone changes no setting, so nothing is restored after one.
 
 ### 6.6 What cannot be covered
 

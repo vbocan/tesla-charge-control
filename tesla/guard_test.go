@@ -155,15 +155,17 @@ func TestIdleGuardStopsForOverloadAndRestarts(t *testing.T) {
 		t.Errorf("reason %q should count down to the restart", r)
 	}
 
+	// Restarted at what the car was drawing (its setting was never read), not
+	// at the 23 A the house would allow.
 	c.overloadPausedAt = time.Now().Add(-maxResumeHoldoff - time.Second)
 	c.Evaluate(house(300))
-	if got, want := sink.next(t), (bleOp{kind: opStart, amps: 23}); got != want {
+	if got, want := sink.next(t), (bleOp{kind: opStart, amps: 10}); got != want {
 		t.Fatalf("queued %v, want %v", got, want)
 	}
 
 	// The charge is running again: guarded as before, no more starts.
-	c.twc = chargingTWC(23)
-	c.Evaluate(house(300 + 23*230))
+	c.twc = chargingTWC(10)
+	c.Evaluate(house(300 + 10*230))
 	sink.none(t)
 	if c.guardStopped {
 		t.Error("the restart landed, so the guard must no longer count the car as stopped")
@@ -214,10 +216,101 @@ func TestIdleGuardStopsRestartingAFullCar(t *testing.T) {
 	if s := c.GetStatus(); s.Status != StatusIdle || !strings.Contains(s.Reason, "charge limit") {
 		t.Errorf("status %q / reason %q, want idle at the charge limit", s.Status, s.Reason)
 	}
-	// Ending the guard puts the car's own current setting back; nothing else.
-	if op := sink.next(t); op.kind != opSetAmps {
-		t.Errorf("queued %v, want the car's setting restored", op)
+	// The restart asked for the 10 A the car was drawing, so there is nothing to
+	// put back, and nothing else is sent.
+	c.Evaluate(house(300))
+	sink.none(t)
+}
+
+// Right after plug-in the car's own setting is often not known yet. The guard
+// must not take max_amps for it: a "reduction" from an assumed 25 A to the 23 A
+// that fit would raise a car charging at 16 A. It asks the car instead.
+func TestIdleGuardNeverRaisesAnUnreadSetting(t *testing.T) {
+	c, sink := newGuardCharger(t)
+	c.twc = chargingTWC(16)
+
+	c.Evaluate(house(300 + 16*230)) // room for 23 A
+	c.Evaluate(house(300 + 16*230))
+	sink.none(t)
+	if len(c.socRefresh) != 1 {
+		t.Error("the guard should ask the car for its setting when it takes over")
 	}
+	if r := c.GetStatus().Reason; !strings.Contains(r, "up to 16A") {
+		t.Errorf("reason %q should work from the 16 A the car draws", r)
+	}
+
+	// The oven: only 11 A fit. Reductions don't wait for the reading.
+	c.Evaluate(house(3000 + 16*230))
+	if got, want := sink.next(t), (bleOp{kind: opSetAmps, amps: 11, urgent: true}); got != want {
+		t.Fatalf("queued %v, want %v", got, want)
+	}
+
+	// A reading now shows the Pi's own 11 A, not the car's setting: ignored.
+	c.chargeMu.Lock()
+	c.chargeState, c.chargeStateAt = &VehicleChargeState{ChargeCurrentA: 11}, time.Now()
+	c.chargeMu.Unlock()
+
+	// The oven goes off: back to the 16 A the car chose, not 11 and not 23.
+	c.twc = chargingTWC(11)
+	c.Evaluate(house(300 + 11*230))
+	if got, want := sink.next(t), (bleOp{kind: opSetAmps, amps: 16}); got != want {
+		t.Fatalf("queued %v, want %v", got, want)
+	}
+}
+
+// Once the car's setting is read, before the guard has changed anything, it is
+// the ceiling, even above what the car happens to be drawing.
+func TestIdleGuardAdoptsTheSettingOnceRead(t *testing.T) {
+	c, sink := newGuardCharger(t)
+	c.twc = chargingTWC(12) // still ramping up
+	c.Evaluate(house(300 + 12*230))
+	sink.none(t)
+
+	c.chargeMu.Lock()
+	c.chargeState, c.chargeStateAt = &VehicleChargeState{ChargeCurrentA: 20}, time.Now()
+	c.chargeMu.Unlock()
+	c.twc = chargingTWC(20)
+	c.Evaluate(house(300 + 20*230))
+	sink.none(t)
+
+	c.Evaluate(house(2500 + 20*230)) // room for 13 A
+	if got, want := sink.next(t), (bleOp{kind: opSetAmps, amps: 13, urgent: true}); got != want {
+		t.Fatalf("queued %v, want %v", got, want)
+	}
+	c.twc = pluggedTWC() // the car finishes: its 20 A goes back
+	c.Evaluate(house(300))
+	if got, want := sink.next(t), (bleOp{kind: opSetAmps, amps: 20}); got != want {
+		t.Fatalf("queued %v, want %v", got, want)
+	}
+}
+
+// A reading older than the last current the Pi set (in another mode, say) no
+// longer shows the car's setting.
+func TestIdleGuardIgnoresAStaleSetting(t *testing.T) {
+	c, sink := newGuardCharger(t)
+	read := time.Now().Add(-time.Minute)
+	c.chargeState, c.chargeStateAt = &VehicleChargeState{ChargeCurrentA: 25}, read
+	c.ampsSetAt = read.Add(time.Second) // Solar mode then set 12 A
+	c.twc = chargingTWC(12)
+
+	c.Evaluate(house(300 + 12*230)) // room for 23 A
+	sink.none(t)
+	if c.guardCeiling != 0 {
+		t.Errorf("ceiling %d A from a stale reading", c.guardCeiling)
+	}
+}
+
+// A stop doesn't change the car's setting, so there is nothing to put back.
+func TestIdleGuardStopAloneRestoresNothing(t *testing.T) {
+	c, sink := newGuardCharger(t)
+	c.chargeState = &VehicleChargeState{ChargeCurrentA: 10}
+	c.twc = chargingTWC(10)
+	c.Evaluate(house(5000 + 10*230)) // not even 5 A fits
+	if got, want := sink.next(t), (bleOp{kind: opStop, urgent: true}); got != want {
+		t.Fatalf("queued %v, want %v", got, want)
+	}
+
+	c.twc = &TWCClient{online: true, vitals: &TWCVitals{GridV: 230}} // unplugged
 	c.Evaluate(house(300))
 	sink.none(t)
 }
